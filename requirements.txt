@@ -1,0 +1,11 @@
+celery==5.7.0
+django-celery-beat==2.9.0
+Django==6.0.10
+djangorestframework==3.18.3
+djangorestframework_simplejwt==5.5.1
+drf-spectacular==0.30.0
+flower==2.2.0
+packaging==26.3
+python-dotenv==1.2.4
+redis==8.1.0
+requests==2.34.2

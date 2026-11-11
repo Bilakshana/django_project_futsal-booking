@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Payment result</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; }
+    .ok { color: #166534; } .warn { color: #92400e; } .bad { color: #991b1b; }
+  </style>
+</head>
+<body>
+  {% if outcome == "completed" or outcome == "already_processed" and payment.status == "completed" %}
+    <h1 class="ok">Booking confirmed</h1>
+    <p>Your advance of Rs. {{ payment.amount }} was received. See you on the pitch!</p>
+  {% elif outcome == "refund_required" or outcome == "already_processed" and payment.status == "refund_required" %}
+    <h1 class="warn">Payment received, but the slot was lost</h1>
+    <p>Your hold expired and the slot was taken. Your Rs. {{ payment.amount }} will be refunded.</p>
+  {% elif outcome == "pending" %}
+    <h1 class="warn">Payment pending</h1>
+    <p>Khalti hasn't confirmed this payment yet. Check your booking status shortly.</p>
+  {% elif outcome == "unavailable" %}
+    <h1 class="warn">Couldn't verify your payment</h1>
+    <p>Khalti could not be reached. Please reload this page in a moment.</p>
+  {% elif outcome == "invalid" %}
+    <h1 class="bad">Invalid request</h1>
+  {% else %}
+    <h1 class="bad">Payment not completed</h1>
+    <p>The payment was cancelled, expired or could not be verified. Your slot is held for a few minutes: you can try again.</p>
+  {% endif %}
+</body>
+</html>
