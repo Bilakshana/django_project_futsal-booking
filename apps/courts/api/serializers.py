@@ -1,8 +1,22 @@
+import logging
+
 from django.db import transaction
 from rest_framework import serializers
 
 from apps.courts.models import Court, Slot
 from apps.courts.tasks import generate_daily_slots
+
+
+logger = logging.getLogger(__name__)
+
+
+def _queue_slot_generation(court_id):
+    # The court is already saved: a down broker must not turn that into a 500.
+    # The nightly generate_daily_slots run fills the court's slots instead.
+    try:
+        generate_daily_slots.delay(court_id=court_id)
+    except Exception:
+        logger.exception("Could not queue slot generation for court %s", court_id)
 
 
 class CourtSerializer(serializers.ModelSerializer):
@@ -27,7 +41,7 @@ class CourtSerializer(serializers.ModelSerializer):
         with transaction.atomic():
             court = super().create(validated_data)
             # Give the new court its first 7 days of slots straight away
-            transaction.on_commit(lambda: generate_daily_slots.delay(court_id=court.pk))
+            transaction.on_commit(lambda: _queue_slot_generation(court.pk))
         return court
 
 

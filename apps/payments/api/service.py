@@ -85,6 +85,15 @@ def khalti_lookup(pidx):
     return _post("/epayment/lookup/", {"pidx": pidx})
 
 
+def _queue_credit(task, paymentlog_id):
+    # The payment is already confirmed and committed: a down broker must not show the player an
+    # error page. The credit_missing_wallets beat task credits the owner later.
+    try:
+        task.delay(paymentlog_id)
+    except Exception:
+        logger.exception("Could not queue wallet credit for payment %s", paymentlog_id)
+
+
 def apply_lookup_result(paymentlog_id, lookup):
     """Apply a verified Khalti lookup to a Paymentlog. Idempotent and atomic.
 
@@ -133,7 +142,7 @@ def apply_lookup_result(paymentlog_id, lookup):
             if booking and confirm_booking_locked(booking, slot):
                 log.status = PaymentStatus.COMPLETED
                 log.save(update_fields=["status", "khalti_txn_id", "modified_at"])
-                transaction.on_commit(lambda: credit_wallet.delay(log.pk))
+                transaction.on_commit(lambda: _queue_credit(credit_wallet, log.pk))
                 return "completed"
 
             logger.warning("Payment %s verified but booking can't be confirmed; refund needed", log.pk)

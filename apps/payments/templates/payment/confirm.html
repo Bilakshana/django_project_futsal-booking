@@ -13,9 +13,9 @@
   {% if outcome == "completed" or outcome == "already_processed" and payment.status == "completed" %}
     <h1 class="ok">Booking confirmed</h1>
     <p>Your advance of Rs. {{ payment.amount }} was received. See you on the pitch!</p>
-  {% elif outcome == "refund_required" or outcome == "already_processed" and payment.status == "refund_required" %}
-    <h1 class="warn">Payment received, but the slot was lost</h1>
-    <p>Your hold expired and the slot was taken. Your Rs. {{ payment.amount }} will be refunded.</p>
+  {% elif outcome == "refund_required" or outcome == "amount_mismatch" or outcome == "already_processed" and payment.status == "refund_required" %}
+    <h1 class="warn">Payment received, but the booking couldn't be confirmed</h1>
+    <p>We received your payment but could not confirm the booking (the hold expired and the slot was taken, or the amount didn't match). Your money will be refunded.</p>
   {% elif outcome == "pending" %}
     <h1 class="warn">Payment pending</h1>
     <p>Khalti hasn't confirmed this payment yet. Check your booking status shortly.</p>

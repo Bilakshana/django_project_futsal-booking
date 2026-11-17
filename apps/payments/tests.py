@@ -307,3 +307,24 @@ class ReconcileTests(PaymentBase):
         credit_missing_wallets()  # idempotent
         self.refresh()
         self.assertEqual(self.owner.balance, 300)
+
+
+class BrokerDownTests(PaymentBase):
+    def test_confirmed_payment_survives_a_dead_broker_and_is_credited_later(self):
+        with patch(LOOKUP, return_value=self.lookup_result()), \
+                patch("apps.wallet.tasks.credit_wallet.delay", side_effect=ConnectionError("redis down")):
+            response = self.callback()
+
+        self.assertEqual(response.status_code, 200)  # the player still sees success
+        self.refresh()
+        self.assertEqual(self.booking.status, BookingStatus.CONFIRMED)
+        self.assertEqual(self.owner.balance, 0)  # not credited yet...
+        credit_missing_wallets()  # ...the beat backstop does it
+        self.refresh()
+        self.assertEqual(self.owner.balance, 300)
+
+    def test_amount_mismatch_page_does_not_tell_player_to_retry(self):
+        with patch(LOOKUP, return_value=self.lookup_result(total_amount=1000)):
+            response = self.callback()
+        self.assertContains(response, "refunded")
+        self.assertNotContains(response, "try again")
