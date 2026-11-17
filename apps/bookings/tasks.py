@@ -18,6 +18,18 @@ def release_held_slot(booking_id):
 
 
 @shared_task
+def release_expired_holds():
+    """Beat (every minute): sweeper for holds whose one-shot release_held_slot message was lost
+    (broker down, worker restarted), so a slot can never stay held forever."""
+    ids = list(
+        Booking.objects.filter(status=BookingStatus.PENDING, held_until__lt=timezone.now())
+        .values_list("pk", flat=True)
+    )
+    released = sum(release_booking(pk, BookingStatus.EXPIRED) for pk in ids)
+    return f"released {released} expired holds"
+
+
+@shared_task
 def send_booking_reminder():
     """Beat (every 5 min): remind players whose confirmed booking starts within the hour."""
     now = timezone.now()

@@ -1,8 +1,9 @@
 from datetime import date as date_cls
 
+from django.db.models import ProtectedError
 from django.shortcuts import get_object_or_404
-from rest_framework import generics
-from rest_framework.exceptions import ValidationError
+from rest_framework import generics, status
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.permissions import IsAuthenticated
 
 from apps.accounts.api.permissions import IsOwnerOrAdmin
@@ -10,6 +11,11 @@ from apps.accounts.models import Role
 from apps.courts.api.permissions import IsCourtOwnerOrReadOnly
 from apps.courts.api.serializers import CourtSerializer, SlotSerializer
 from apps.courts.models import Court, Slot
+
+
+class Conflict(APIException):
+    status_code = status.HTTP_409_CONFLICT
+    default_code = "conflict"
 
 
 def courts_for(user):
@@ -38,6 +44,12 @@ class CourtDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return Court.objects.all() if self.request.method == "GET" else courts_for(self.request.user)
+
+    def perform_destroy(self, instance):
+        try:
+            instance.delete()
+        except ProtectedError:  # slots with bookings can't be removed
+            raise Conflict("This court has bookings and can't be deleted. Set is_active to false instead.")
 
 
 class CourtSlotListView(generics.ListAPIView):

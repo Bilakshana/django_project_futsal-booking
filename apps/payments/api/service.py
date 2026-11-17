@@ -42,9 +42,13 @@ def _post(path, payload):
             headers=_headers(),
             timeout=settings.KHALTI_TIMEOUT,
         )
-        return response.json()
+        body = response.json()
     except (requests.RequestException, ValueError) as exc:
         raise KhaltiError(str(exc)) from exc
+    # A 5xx or a non-object body says nothing about the payment: treat it as "Khalti unavailable"
+    if response.status_code >= 500 or not isinstance(body, dict):
+        raise KhaltiError(f"unexpected Khalti response (HTTP {response.status_code})")
+    return body
 
 
 def khalti_payment(**kwargs):
@@ -85,7 +89,7 @@ def apply_lookup_result(paymentlog_id, lookup):
     """Apply a verified Khalti lookup to a Paymentlog. Idempotent and atomic.
 
     Returns one of: already_processed, completed, refund_required, pending, failed,
-    amount_mismatch.
+    amount_mismatch, unavailable.
     """
     # imported here: bookings.api.service imports this module
     from apps.bookings.api.service import confirm_booking_locked
@@ -106,6 +110,10 @@ def apply_lookup_result(paymentlog_id, lookup):
             return "already_processed"
 
         khalti_status = lookup.get("status")
+        if not khalti_status or lookup.get("pidx", log.pidx) != log.pidx:
+            # error body (bad key, unknown pidx) or a reply about another payment: no verdict
+            logger.warning("Inconclusive Khalti lookup for payment %s: %s", log.pk, lookup)
+            return "unavailable"
 
         if khalti_status == "Completed":
             try:
@@ -115,8 +123,10 @@ def apply_lookup_result(paymentlog_id, lookup):
             if paid != log.amount * 100:
                 logger.error("Amount mismatch for payment %s: expected %s paisa, Khalti says %s",
                              log.pk, log.amount * 100, lookup.get("total_amount"))
-                log.status = PaymentStatus.FAILED
-                log.save(update_fields=["status", "modified_at"])
+                # Khalti holds money we can't match to this booking: flag it for a manual refund
+                log.status = PaymentStatus.REFUND_REQUIRED
+                log.khalti_txn_id = lookup.get("transaction_id")
+                log.save(update_fields=["status", "khalti_txn_id", "modified_at"])
                 return "amount_mismatch"
 
             log.khalti_txn_id = lookup.get("transaction_id")

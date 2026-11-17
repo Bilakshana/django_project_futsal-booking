@@ -52,6 +52,7 @@ Docs: http://localhost:8000/api/swagger/ - admin: http://localhost:8000/admin/
 
 Beat runs (`CELERY_BEAT_SCHEDULE`, stored by django-celery-beat):
 `generate_daily_slots` 00:05 nightly, `send_booking_reminder` every 5 min, `mark_completed_bookings` every 10 min.
+Safety nets: `release_expired_holds` every minute (frees holds whose release message was lost), `reconcile_payments` every 5 min (confirms players who paid but never returned to the callback), `credit_missing_wallets` every 15 min.
 
 ## Tests
 
@@ -78,6 +79,9 @@ Other endpoints: `GET /api/bookings/` (role-scoped), `POST /api/bookings/<id>/ca
 - **No double booking:** `hold_slot` runs in `transaction.atomic()` and `select_for_update()`s the Slot row; `UNIQUE(court, date, start_time)` on `Slot` and a partial unique constraint (one live booking per slot) are the database-level backstop.
 - **Callback is idempotent:** completed payments return early without calling Khalti; otherwise the Booking, Slot and Paymentlog rows are locked (always in that order) inside `transaction.atomic()` and re-checked. `Statement` has `UNIQUE(types, reference)`, so a payment can't be credited twice.
 - **Late payments:** if Khalti confirms a payment after the hold expired, the booking is revived when the slot is still free; if someone else took it, the log becomes `refund_required` (money received, owner not credited, refund by hand in the Khalti dashboard).
+- **Initiate is idempotent:** calling it twice returns the same Khalti `payment_url`, so a paid `pidx` is never orphaned. A lookup with no verdict (error body, 5xx, other pidx) never marks a payment failed; an amount mismatch becomes `refund_required`.
+- **Limits:** max 2 unpaid holds per player, 10 holds/min, 10 logins/min and 5 registrations/hour per IP.
+- With `DEBUG=False` the app refuses to start without a strong `SECRET_KEY` and turns on HTTPS/HSTS/secure-cookie settings (`KHALTI_RETURN_URL` must be https).
 - Tasks are dispatched with `transaction.on_commit`, so a worker never sees a row that isn't committed yet.
 
 ## Known limits

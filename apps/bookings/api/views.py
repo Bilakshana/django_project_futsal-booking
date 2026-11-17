@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.accounts.api.permissions import IsPlayer
+from apps.accounts.api.throttles import HoldThrottle
 from apps.accounts.models import Role
 from apps.bookings.api.serializers import BookingSerializer, HoldSlotSerializer
 from apps.bookings.api.service import release_booking
@@ -18,6 +19,7 @@ class HoldSlotView(GenericAPIView):
 
     serializer_class = HoldSlotSerializer
     permission_classes = [IsAuthenticated, IsPlayer]
+    throttle_classes = [HoldThrottle]
 
     def post(self, request):
         serializer = self.get_serializer(data=request.data)

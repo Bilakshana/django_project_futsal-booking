@@ -1,4 +1,7 @@
+from datetime import timedelta
 from unittest.mock import Mock, patch
+
+from django.utils import timezone
 
 from django.urls import reverse
 from rest_framework.test import APITestCase
@@ -12,7 +15,8 @@ from apps.courts.models import SlotStatus
 from apps.payments.api.service import KhaltiError
 from apps.payments.models import Paymentlog, PaymentStatus
 from apps.wallet.models import Statement
-from apps.wallet.tasks import credit_wallet
+from apps.payments.tasks import reconcile_payments
+from apps.wallet.tasks import credit_missing_wallets, credit_wallet
 
 LOOKUP = "apps.payments.views.khalti_lookup"
 
@@ -47,11 +51,31 @@ class PaymentBase(APITestCase):
 class InitiatePaymentTests(PaymentBase):
     url = property(lambda self: f"/api/payment/initiate/{self.log.pk}/")
 
-    def post_with_khalti(self, response_json):
+    def post_with_khalti(self, response_json, http_status=200):
         with patch("apps.payments.api.service.requests.post") as post:
-            post.return_value = Mock(json=lambda: response_json)
+            post.return_value = Mock(json=lambda: response_json, status_code=http_status)
             response = self.client.post(self.url)
         return response, post
+
+    def test_initiating_twice_reuses_the_same_khalti_payment(self):
+        self.client.force_authenticate(self.player)
+        self.log.pidx, self.log.status = None, PaymentStatus.PENDING
+        self.log.save()
+        first, _ = self.post_with_khalti({"pidx": "p1", "payment_url": "https://pay.example/p1"})
+        second, post = self.post_with_khalti({"pidx": "p2", "payment_url": "https://pay.example/p2"})
+
+        self.assertEqual(second.json()["payment_url"], first.json()["payment_url"])
+        post.assert_not_called()  # Khalti isn't asked for a second payment
+        self.log.refresh_from_db()
+        self.assertEqual(self.log.pidx, "p1")  # a paid pidx can't be orphaned
+
+    def test_khalti_server_error_does_not_leak_or_save(self):
+        self.client.force_authenticate(self.player)
+        self.log.pidx, self.log.status = None, PaymentStatus.PENDING
+        self.log.save()
+        response, _ = self.post_with_khalti({"detail": "secret internals"}, http_status=500)
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("secret", response.content.decode())
 
     def test_get_is_not_allowed(self):
         self.client.force_authenticate(self.player)
@@ -68,6 +92,8 @@ class InitiatePaymentTests(PaymentBase):
 
     def test_initiate_calls_khalti_with_clean_auth_header(self):
         self.client.force_authenticate(self.player)
+        self.log.pidx, self.log.status = None, PaymentStatus.PENDING
+        self.log.save()
         response, post = self.post_with_khalti({"pidx": "new-pidx", "payment_url": "https://test-pay.khalti.com/?pidx=new-pidx"})
 
         self.assertEqual(response.status_code, 200)
@@ -147,14 +173,38 @@ class PaymentCallbackTests(PaymentBase):
         self.assertEqual(self.owner.balance, 0)
         self.assertEqual(Statement.objects.count(), 0)
 
-    def test_wrong_amount_is_not_accepted(self):
+    def test_wrong_amount_is_not_accepted_and_flagged_for_refund(self):
         with patch(LOOKUP, return_value=self.lookup_result(total_amount=1000)):
             self.callback()
 
         self.refresh()
-        self.assertEqual(self.log.status, PaymentStatus.FAILED)
+        self.assertEqual(self.log.status, PaymentStatus.REFUND_REQUIRED)  # Khalti has money we can't match
         self.assertEqual(self.slot.status, SlotStatus.HELD)
+        self.assertEqual(self.booking.status, BookingStatus.PENDING)
         self.assertEqual(self.owner.balance, 0)
+
+    def test_error_body_from_khalti_does_not_fail_the_payment(self):
+        """A 401/404 body has no status: that is 'no verdict', never 'failed'."""
+        with patch(LOOKUP, return_value={"detail": "Not found.", "status_code": 404}):
+            self.callback()
+        self.refresh()
+        self.assertEqual(self.log.status, PaymentStatus.INITIAL)
+        self.assertEqual(self.booking.status, BookingStatus.PENDING)
+
+    def test_lookup_for_a_different_pidx_is_ignored(self):
+        result = {**self.lookup_result(), "pidx": "someone-elses"}
+        with patch(LOOKUP, return_value=result):
+            self.callback()
+        self.refresh()
+        self.assertEqual(self.log.status, PaymentStatus.INITIAL)
+
+    def test_khalti_5xx_is_treated_as_unavailable(self):
+        with patch("apps.payments.api.service.requests.post") as post:
+            post.return_value = Mock(json=lambda: {"status": "Expired"}, status_code=503)
+            response = self.callback()
+        self.assertEqual(response.status_code, 502)
+        self.refresh()
+        self.assertEqual(self.log.status, PaymentStatus.INITIAL)  # not marked failed
 
     def test_cancelled_payment_fails_without_confirming(self):
         with patch(LOOKUP, return_value=self.lookup_result(status="User canceled")):
@@ -215,3 +265,45 @@ class PaymentCallbackTests(PaymentBase):
         self.assertEqual(other_booking.status, BookingStatus.PENDING)
         self.assertEqual(self.owner.balance, 0)  # never credited
         self.assertEqual(Statement.objects.count(), 0)
+
+
+class ReconcileTests(PaymentBase):
+    """Players who pay but never return to the callback must still get their booking."""
+
+    def age_log(self):
+        Paymentlog.objects.filter(pk=self.log.pk).update(
+            modified_at=timezone.now() - timedelta(minutes=10)
+        )
+
+    def test_paid_but_never_returned_is_confirmed_by_beat(self):
+        self.age_log()
+        with patch("apps.payments.tasks.khalti_lookup", return_value=self.lookup_result()):
+            with self.captureOnCommitCallbacks(execute=True):
+                reconcile_payments()
+        self.refresh()
+        self.assertEqual(self.log.status, PaymentStatus.COMPLETED)
+        self.assertEqual(self.booking.status, BookingStatus.CONFIRMED)
+        self.assertEqual(self.owner.balance, 300)
+
+    def test_recent_payments_are_left_for_the_callback(self):
+        with patch("apps.payments.tasks.khalti_lookup") as lookup:
+            reconcile_payments()
+        lookup.assert_not_called()
+
+    def test_khalti_down_changes_nothing(self):
+        self.age_log()
+        with patch("apps.payments.tasks.khalti_lookup", side_effect=KhaltiError("down")):
+            reconcile_payments()
+        self.refresh()
+        self.assertEqual(self.log.status, PaymentStatus.INITIAL)
+
+    def test_missing_wallet_credit_is_backfilled(self):
+        with patch(LOOKUP, return_value=self.lookup_result()):
+            self.callback()
+        Statement.objects.all().delete()
+        self.owner.balance = 0
+        self.owner.save()
+        credit_missing_wallets()
+        credit_missing_wallets()  # idempotent
+        self.refresh()
+        self.assertEqual(self.owner.balance, 300)

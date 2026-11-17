@@ -1,8 +1,9 @@
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.views import TokenRefreshView
 
+from apps.accounts.api.throttles import ThrottledTokenObtainPairView
 from apps.payments.views import payment_callback
 
 urlpatterns = [
@@ -12,7 +13,7 @@ urlpatterns = [
     path("api/bookings/", include("apps.bookings.api.urls")),
     path("api/payment/", include("apps.payments.api.urls")),
     path("api/wallet/", include("apps.wallet.api.urls")),
-    path("api/login/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/login/", ThrottledTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     # Khalti redirects the player's browser here after payment
     path("payment/callback/", payment_callback, name="callback"),

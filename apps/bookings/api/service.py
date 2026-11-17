@@ -41,6 +41,14 @@ def hold_slot(player, slot_id):
     if slot.start_datetime <= timezone.now():
         raise BookingError("This slot has already started")
 
+    active = Booking.objects.filter(
+        player=player, status=BookingStatus.PENDING, held_until__gt=timezone.now()
+    ).count()
+    if active >= settings.MAX_ACTIVE_HOLDS:
+        raise BookingError(
+            f"You already have {active} unpaid holds. Pay or cancel one before holding another slot"
+        )
+
     slot.status = SlotStatus.HELD
     slot.save(update_fields=["status"])
 

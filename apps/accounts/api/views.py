@@ -1,10 +1,11 @@
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from apps.accounts.api.permissions import IsAdmin
+from apps.accounts.api.throttles import RegisterThrottle
 from apps.accounts.api.serializers import RegisterSerializer, UserSerializer
 from apps.accounts.models import User
 
@@ -27,6 +28,7 @@ def me(request):
 @extend_schema(request=RegisterSerializer, responses={201: None})
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@throttle_classes([RegisterThrottle])
 def register(request):
     serializer = RegisterSerializer(data=request.data)
     if serializer.is_valid():

@@ -20,7 +20,7 @@ class PaymentStatus(models.TextChoices):
 
 
 class Paymentlog(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    user = models.ForeignKey(User, on_delete=models.PROTECT)  # financial records must outlive users
     # string reference avoids a circular import with apps.bookings
     booking = models.ForeignKey("bookings.Booking", null=True, blank=True,
                                 on_delete=models.SET_NULL, related_name="payments")
@@ -28,6 +28,7 @@ class Paymentlog(models.Model):
     types = models.CharField(max_length=20, choices=TypesValue.choices)
     reference = models.CharField(max_length=50, null=True, blank=True)
     pidx = models.CharField(max_length=40, null=True, blank=True, unique=True)
+    payment_url = models.URLField(max_length=300, null=True, blank=True)  # reused if initiate is called again
     txn_id = models.UUIDField(default=uuid.uuid4)
     khalti_txn_id = models.CharField(max_length=70, null=True, blank=True)
     payment_type = models.CharField(max_length=20, choices=PaymentType.choices, null=True, blank=True)

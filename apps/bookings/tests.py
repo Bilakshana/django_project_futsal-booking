@@ -196,3 +196,37 @@ class ScheduledTaskTests(APITestCase):
         future.refresh_from_db()
         self.assertEqual(past.status, BookingStatus.COMPLETED)
         self.assertEqual(future.status, BookingStatus.CONFIRMED)
+
+
+class HoldLimitAndSweeperTests(APITestCase):
+    def setUp(self):
+        self.owner = make_user(Role.OWNER)
+        self.player = make_user()
+        self.court = make_court(self.owner)
+
+    def test_player_cannot_hoard_slots(self):
+        from apps.bookings.api.service import BookingError, hold_slot
+
+        for days in (1, 2):
+            hold_slot(self.player, make_slot(self.court, start_in=timedelta(days=days)).pk)
+        with self.assertRaises(BookingError):
+            hold_slot(self.player, make_slot(self.court, start_in=timedelta(days=3)).pk)
+        # another player is unaffected
+        hold_slot(make_user(), make_slot(self.court, start_in=timedelta(days=4)).pk)
+
+    def test_sweeper_frees_holds_whose_release_message_was_lost(self):
+        from apps.bookings.api.service import hold_slot
+        from apps.bookings.tasks import release_expired_holds
+
+        slot = make_slot(self.court)
+        booking, _ = hold_slot(self.player, slot.pk)
+        release_expired_holds()  # still within the hold window
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, BookingStatus.PENDING)
+
+        Booking.objects.filter(pk=booking.pk).update(held_until=timezone.now() - timedelta(minutes=1))
+        release_expired_holds()
+        booking.refresh_from_db()
+        slot.refresh_from_db()
+        self.assertEqual(booking.status, BookingStatus.EXPIRED)
+        self.assertEqual(slot.status, SlotStatus.AVAILABLE)

@@ -5,3 +5,8 @@ db.sqlite3
 .env
 celerybeat-schedule*
 *.log
+
+.env.*
+!sample.env
+*.sqlite3
+staticfiles/

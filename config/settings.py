@@ -10,6 +10,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from celery.schedules import crontab
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,9 +24,18 @@ def env_bool(name, default=False):
 
 TESTING = "test" in sys.argv
 
-# SECURITY WARNING: set a real SECRET_KEY and DEBUG=False in production.
-SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-dev-only-change-me")
-DEBUG = env_bool("DEBUG", True)
+# DEBUG is off unless .env turns it on (sample.env does, for local development).
+DEBUG = env_bool("DEBUG", False)
+_DEV_KEY = "django-insecure-dev-only-change-me"
+SECRET_KEY = os.getenv("SECRET_KEY") or _DEV_KEY
+# simplejwt signs tokens with SECRET_KEY, so a guessable key means forgeable admin tokens.
+if not DEBUG and not TESTING and (
+    SECRET_KEY == _DEV_KEY or SECRET_KEY.startswith("change-me") or len(SECRET_KEY) < 50
+):
+    raise ImproperlyConfigured(
+        "Set a random SECRET_KEY of 50+ characters in .env when DEBUG is off. Generate one with: "
+        'python -c "from django.core.management.utils import get_random_secret_key as g; print(g())"'
+    )
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
 
 
@@ -48,6 +58,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "drf_spectacular",
     "django_celery_beat",
+    "rest_framework_simplejwt.token_blacklist",
 ]
 
 MIDDLEWARE = [
@@ -108,6 +119,10 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.getenv("ACCESS_TOKEN_LIFETIME", "30"))),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "ALGORITHM": "HS256",
+    "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
 AUTH_USER_MODEL = "accounts.User"
@@ -141,6 +156,10 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/min",
         "user": "240/min",
+        # stricter limits for abuse-prone endpoints (see apps/accounts/api/throttles.py)
+        "login": "10/min",
+        "register": "5/hour",
+        "hold": "10/min",
     },
 }
 
@@ -159,6 +178,7 @@ DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "bookings@futsal.local")
 SLOT_HOLD_SECONDS = int(os.getenv("SLOT_HOLD_SECONDS", "600"))  # unpaid holds are released after 10 minutes
 ADVANCE_PERCENT = int(os.getenv("ADVANCE_PERCENT", "30"))  # advance = 30% of the slot price
 MIN_ADVANCE_AMOUNT = 10  # Khalti's minimum payment is Rs. 10
+MAX_ACTIVE_HOLDS = 2  # unpaid holds one player may have at once (stops slot hoarding)
 SLOT_GENERATION_DAYS = 7
 REMINDER_LEAD_MINUTES = 60
 
@@ -195,7 +215,29 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.bookings.tasks.mark_completed_bookings",
         "schedule": crontab(minute="*/10"),
     },
+    # safety nets for lost broker messages / players who never return from Khalti
+    "release-expired-holds": {
+        "task": "apps.bookings.tasks.release_expired_holds",
+        "schedule": crontab(minute="*"),
+    },
+    "reconcile-payments": {
+        "task": "apps.payments.tasks.reconcile_payments",
+        "schedule": crontab(minute="*/5"),
+    },
+    "credit-missing-wallets": {
+        "task": "apps.wallet.tasks.credit_missing_wallets",
+        "schedule": crontab(minute="*/15"),
+    },
 }
+
+if not DEBUG and not TESTING:
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31536000
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    if not KHALTI_RETURN_URL.startswith("https://"):
+        raise ImproperlyConfigured("KHALTI_RETURN_URL must be https:// when DEBUG is off")
 
 if TESTING:
     # Tests must not need Redis: run tasks inline against an in-memory broker.
@@ -204,5 +246,7 @@ if TESTING:
     CELERY_TASK_ALWAYS_EAGER = True
     CELERY_TASK_EAGER_PROPAGATES = True
     KHALTI_TOKEN = "test-token"
+    # per-IP/user throttles would trip over the many requests a test run makes
+    REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"].update(login="10000/min", register="10000/min", hold="10000/min")
     PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]  # fast tests
     EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
